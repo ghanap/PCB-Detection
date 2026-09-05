@@ -19,3 +19,7 @@ python scripts/tile_dataset.py
 ```bash
 python scripts/train.py
 ```
+
+## Contributors & Advisors
+- **Anagha Pillalamarri** ([@ghanap](https://github.com/ghanap))
+- **Prof. Sk Aziz Ali** ([@saali14](https://github.com/saali14)) — Assistant Professor of CSIS, BITS Pilani (Hyderabad)
