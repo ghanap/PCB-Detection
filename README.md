@@ -1,4 +1,4 @@
-# PCB Component Detection & Segmentation
+# PCB Component Detection, Segmentation & SAM-Road Graph Studio
 
 ### 1. Data Download & Board-Level Split
 ```bash
@@ -19,6 +19,13 @@ python scripts/tile_dataset.py
 ```bash
 python scripts/train.py
 ```
+
+### 5. SAM-Road (2024) End-to-End Graph Extraction
+Runs SAM ViT Transformer backbone (`sam_vit_b.pth`) for zero-shot domain graph topology extraction.
+```bash
+python scripts/run_sam_road.py
+```
+- **Kaggle SAM-Road Notebook**: [notebooks/kaggle_sam_road_pipeline.ipynb](notebooks/kaggle_sam_road_pipeline.ipynb)
 
 ## Contributors & Advisors
 - **Anagha Pillalamarri** ([@ghanap](https://github.com/ghanap))
