@@ -2,25 +2,7 @@
 """
 dataproc.py
 
-Multi-Dataset PCB Component & Defect Detection Pipeline using Pretrained Segment Anything Model (SAM):
-- LabelMe Exporter: Automatically exports SAM polygon overlays into LabelMe JSON format (.json)
-- Label Homogenizer Engine: Automatically maps messy multi-source labels (c, cap, resistor, MOSFET, chip, etc.)
-  into unified KiCad Library Convention (KLC) Taxonomy ('Capacitor_SMD', 'Resistor_SMD', 'Package_SO', etc.)
-
-- Supported Kaggle Datasets:
-  1. WACV 2019 PCB Dataset
-  2. Kaggle FICS-PCB Component Dataset (ficslab/fics-pcb)
-  3. PKU PCB Defect Dataset (akhatovar/pcb-defect-dataset)
-  4. DeepPCB Defect Dataset (arnablaha/deeppcb)
-
-Pipeline Workflow:
-1. Downloads SAM ViT-B pretrained weights (sam_vit_b.pth).
-2. Multi-Dataset Downloader: Pulls WACV, FICS-PCB, PKU PCB Defect, and DeepPCB via kagglehub.
-3. Label Homogenization: Normalizes diverse raw labels into KiCad standard taxonomy.
-4. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
-5. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
-6. Multi-Format Exporter: Saves polygon points to LabelMe JSON (.json), CSV (polygon_points.csv), and YOLO-seg (.txt).
-7. Data Augmentation Engine: Applies polygon-aware spatial flips, rotations, and HSV color jitter.
+PCB Component Detection & SAM Point Extractor Pipeline.
 """
 
 import os
@@ -35,11 +17,9 @@ import cv2
 import torch
 from pathlib import Path
 
-# Try importing segment_anything, pandas, and kagglehub, install if missing
 try:
     from segment_anything import sam_model_registry, SamPredictor
 except ImportError:
-    print("Installing segment-anything library from GitHub...")
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "git+https://github.com/facebookresearch/segment-anything.git"])
     from segment_anything import sam_model_registry, SamPredictor
@@ -51,7 +31,6 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "kagglehub"])
     import kagglehub
 
-# KiCad Standard Footprint Class Names (KLC Format)
 KICAD_CLASSES = [
     'Capacitor_SMD',
     'Resistor_SMD',
@@ -82,7 +61,6 @@ LABEL_SYNONYMS = {
 }
 
 class LabelHomogenizer:
-    """Normalizes multi-dataset component & defect labels into a unified KiCad taxonomy."""
     def __init__(self):
         self.lookup = {}
         for std_name, synonyms in LABEL_SYNONYMS.items():
@@ -106,38 +84,30 @@ class LabelHomogenizer:
 homogenizer = LabelHomogenizer()
 
 KAGGLE_DATASETS = {
-    "fics_pcb": "ficslab/fics-pcb",                 # PCB Component Detection
-    "pku_pcb_defect": "akhatovar/pcb-defect-dataset", # PKU PCB Defect Dataset
-    "deeppcb": "arnablaha/deeppcb"                   # DeepPCB Defect Dataset
+    "fics_pcb": "ficslab/fics-pcb",
+    "pku_pcb_defect": "akhatovar/pcb-defect-dataset",
+    "deeppcb": "arnablaha/deeppcb"
 }
 
 SAM_WEIGHTS_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
 SAM_CHECKPOINT = Path(r"C:\Users\ANAGHA\sam_vit_b.pth")
 
 def download_sam_weights():
-    """Downloads SAM ViT-B pretrained weights if not present locally."""
     if not SAM_CHECKPOINT.exists():
         print(f"Downloading SAM pretrained weights to {SAM_CHECKPOINT}...")
         SAM_CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
         urllib.request.urlretrieve(SAM_WEIGHTS_URL, str(SAM_CHECKPOINT))
-        print("SAM weights download complete!")
-    else:
-        print(f"SAM pretrained weights found at: {SAM_CHECKPOINT}")
 
 def pull_kaggle_pcb_dataset(name="pku_pcb_defect"):
-    """Downloads PCB Component or Defect datasets from Kaggle via kagglehub."""
     slug = KAGGLE_DATASETS.get(name, name)
-    print(f"Pulling Kaggle PCB dataset '{name}' ({slug}) via kagglehub...")
     try:
         path = kagglehub.dataset_download(slug)
-        print(f"SUCCESS: Kaggle dataset '{name}' downloaded to: {path}")
         return Path(path)
     except Exception as e:
-        print(f"Note on Kaggle Download: {e}")
+        print(f"Dataset Download Note: {e}")
         return None
 
 def clean_bounding_boxes(boxes, img_w, img_h, min_box_size=10):
-    """Cleans and filters out invalid or out-of-bounds bounding boxes."""
     cleaned_boxes = []
     for box, raw_lbl in boxes:
         x1, y1, x2, y2 = box
@@ -153,7 +123,6 @@ def clean_bounding_boxes(boxes, img_w, img_h, min_box_size=10):
     return cleaned_boxes
 
 def extract_polygon_points(mask: np.ndarray, img_w: int, img_h: int):
-    """Extracts normalized boundary points (x, y) from a binary mask using OpenCV findContours."""
     contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polygon_lines = []
     
@@ -175,7 +144,6 @@ def extract_polygon_points(mask: np.ndarray, img_w: int, img_h: int):
     return polygon_lines
 
 def export_to_labelme_json(image_name, img_w, img_h, polygon_records, output_json_path):
-    """Exports SAM polygon points to standard LabelMe JSON format for interactive visual GUI editing."""
     shapes = []
     for rec in polygon_records:
         raw_lbl = rec.get('raw_label', rec.get('class_id'))
@@ -192,7 +160,7 @@ def export_to_labelme_json(image_name, img_w, img_h, polygon_records, output_jso
             "label": kicad_name,
             "points": pixel_pts,
             "group_id": None,
-            "description": "SAM Auto-Annotation Overlay",
+            "description": "SAM Polygon",
             "shape_type": "polygon",
             "flags": {}
         })
@@ -213,7 +181,6 @@ def export_to_labelme_json(image_name, img_w, img_h, polygon_records, output_jso
     return output_json_path
 
 def save_polygon_points_to_csv(extracted_records, output_csv_path):
-    """Saves extracted SAM polygon (x, y) points into a CSV with KiCad standard class names."""
     rows = []
     for record in extracted_records:
         raw_lbl = record.get('raw_label', record.get('class_id'))
@@ -233,15 +200,12 @@ def save_polygon_points_to_csv(extracted_records, output_csv_path):
         })
     df = pd.DataFrame(rows)
     df.to_csv(output_csv_path, index=False)
-    print(f"Saved {len(df)} polygon instances to Homogenized KiCad CSV: {output_csv_path}")
     return df
 
-def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
-    """Processes PCB dataset through SAM with cleaning, LabelMe JSON export, & CSV export."""
+def run_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
     download_sam_weights()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"\nInitializing SAM (vit_b) on device: {device}...")
     sam = sam_model_registry["vit_b"](checkpoint=str(SAM_CHECKPOINT))
     sam.to(device=device)
     sam.eval()
@@ -258,8 +222,6 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
     out_vis_dir.mkdir(parents=True, exist_ok=True)
     
     img_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
-    print(f"Found {len(img_files)} PCB images to process...")
-    
     csv_records = []
     
     for img_path in img_files:
@@ -311,26 +273,17 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
                 csv_records.append(rec)
                 img_records.append(rec)
                 
-        # 1. Save YOLO-seg .txt label
         with open(out_seg_dir / f"{stem}.txt", "w") as f:
             f.write("\n".join(yolo_seg_rows))
             
-        # 2. Export LabelMe .json overlay file
         export_to_labelme_json(img_path.name, w, h, img_records, out_labelme_dir / f"{stem}.json")
-            
-        print(f"Processed: {img_path.name} -> {len(yolo_seg_rows)} SAM polygons exported to YOLO & LabelMe JSON.")
         
     if csv_records:
         save_polygon_points_to_csv(csv_records, output_dir / "polygon_points.csv")
-        
-    print(f"\nPipeline execution complete! Results saved to: {output_dir}")
 
 if __name__ == "__main__":
-    pull_kaggle_pcb_dataset("pku_pcb_defect")
-    pull_kaggle_pcb_dataset("deeppcb")
-    
-    dataset_path = Path(r"C:\Userdata\antiiii\wacv_pcb_dataset")
-    output_path = Path(r"C:\Userdata\antiiii\wacv_sam_output")
+    dataset_path = Path(r"C:\Userdata\antiiii\pcb_dataset")
+    output_path = Path(r"C:\Userdata\antiiii\sam_output")
     (dataset_path / "images").mkdir(parents=True, exist_ok=True)
     (dataset_path / "labels").mkdir(parents=True, exist_ok=True)
-    run_wacv_sam_pipeline(dataset_path, output_path, augment=True)
+    run_sam_pipeline(dataset_path, output_path, augment=True)
