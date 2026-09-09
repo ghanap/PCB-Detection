@@ -2,9 +2,16 @@
 """
 dataproc.py
 
-Multi-Dataset PCB Component Detection Pipeline using Pretrained Segment Anything Model (SAM):
-1. Downloads & loads SAM ViT-B pretrained weights (sam_vit_b.pth).
-2. Dataset Downloader: Pulls WACV and Kaggle PCB datasets using kagglehub / URLs.
+Multi-Dataset PCB Component & Defect Detection Pipeline using Pretrained Segment Anything Model (SAM):
+- Supported Kaggle Datasets:
+  1. WACV 2019 PCB Dataset
+  2. Kaggle FICS-PCB Component Dataset (ficslab/fics-pcb)
+  3. PKU PCB Defect Dataset (akhatovar/pcb-defect-dataset)
+  4. DeepPCB Defect Dataset (arnablaha/deeppcb)
+
+Pipeline Workflow:
+1. Downloads SAM ViT-B pretrained weights (sam_vit_b.pth).
+2. Multi-Dataset Downloader: Pulls WACV, FICS-PCB, PKU PCB Defect, and DeepPCB via kagglehub.
 3. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
 4. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
 5. Data Augmentation Engine: Applies polygon-aware spatial flips, rotations, and HSV color jitter.
@@ -38,23 +45,16 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "kagglehub"])
     import kagglehub
 
-# WACV 2019 PCB Component Class Map
+# WACV & PKU Component/Defect Class Maps
 WACV_CLASSES = [
     'capacitor', 'resistor', 'ic', 'transistor', 'diode', 
     'connector', 'inductor', 'switch', 'led', 'button'
 ]
 
-CLASS_COLORS = {
-    'capacitor': (255, 0, 0),      # Blue
-    'resistor': (0, 255, 0),       # Green
-    'ic': (0, 0, 255),             # Red
-    'transistor': (255, 255, 0),   # Cyan
-    'diode': (255, 0, 255),        # Magenta
-    'connector': (0, 255, 255),    # Yellow
-    'inductor': (128, 0, 255),     # Purple
-    'switch': (255, 128, 0),       # Orange
-    'led': (0, 255, 128),          # Spring Green
-    'button': (128, 255, 0)        # Lime
+KAGGLE_DATASETS = {
+    "fics_pcb": "ficslab/fics-pcb",                 # PCB Component Detection
+    "pku_pcb_defect": "akhatovar/pcb-defect-dataset", # PKU PCB Defect Dataset
+    "deeppcb": "arnablaha/deeppcb"                   # DeepPCB Defect Dataset
 }
 
 SAM_WEIGHTS_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
@@ -70,12 +70,13 @@ def download_sam_weights():
     else:
         print(f"SAM pretrained weights found at: {SAM_CHECKPOINT}")
 
-def pull_kaggle_pcb_dataset(dataset_slug="ficslab/fics-pcb"):
-    """Downloads PCB dataset from Kaggle via kagglehub."""
-    print(f"Pulling Kaggle PCB dataset '{dataset_slug}' via kagglehub...")
+def pull_kaggle_pcb_dataset(name="pku_pcb_defect"):
+    """Downloads PCB Component or Defect datasets from Kaggle via kagglehub."""
+    slug = KAGGLE_DATASETS.get(name, name)
+    print(f"Pulling Kaggle PCB dataset '{name}' ({slug}) via kagglehub...")
     try:
-        path = kagglehub.dataset_download(dataset_slug)
-        print(f"Kaggle dataset downloaded to: {path}")
+        path = kagglehub.dataset_download(slug)
+        print(f"SUCCESS: Kaggle dataset '{name}' downloaded to: {path}")
         return Path(path)
     except Exception as e:
         print(f"Note on Kaggle Download: {e}")
@@ -98,16 +99,13 @@ def clean_bounding_boxes(boxes, img_w, img_h, min_box_size=10):
     return cleaned_boxes
 
 def extract_polygon_points(mask: np.ndarray, img_w: int, img_h: int):
-    """
-    Extracts normalized boundary points (x, y) from a binary mask using OpenCV findContours.
-    Returns normalized polygon string formatted for YOLO-seg.
-    """
+    """Extracts normalized boundary points (x, y) from a binary mask using OpenCV findContours."""
     contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polygon_lines = []
     
     for cnt in contours:
         if cv2.contourArea(cnt) < 15:
-            continue  # Filter out tiny noise contours
+            continue
             
         epsilon = 0.005 * cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, epsilon, True)
@@ -153,7 +151,7 @@ def augment_image_and_polygons(image, polygon_instances, flip_h=False, flip_v=Fa
     return aug_img, aug_polygons
 
 def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
-    """Processes WACV PCB dataset through SAM with cleaning & augmentations."""
+    """Processes PCB dataset through SAM with cleaning & augmentations."""
     download_sam_weights()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -172,7 +170,7 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
     out_vis_dir.mkdir(parents=True, exist_ok=True)
     
     img_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
-    print(f"Found {len(img_files)} WACV PCB images to process...")
+    print(f"Found {len(img_files)} PCB images to process...")
     
     for img_path in img_files:
         stem = img_path.stem
@@ -221,8 +219,9 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
     print(f"\nPipeline execution complete! Results saved to: {output_dir}")
 
 if __name__ == "__main__":
-    # Option to pull Kaggle PCB dataset
-    pull_kaggle_pcb_dataset("ficslab/fics-pcb")
+    # Pull Kaggle PKU PCB Defect Dataset & DeepPCB Dataset
+    pull_kaggle_pcb_dataset("pku_pcb_defect")
+    pull_kaggle_pcb_dataset("deeppcb")
     
     dataset_path = Path(r"C:\Userdata\antiiii\wacv_pcb_dataset")
     output_path = Path(r"C:\Userdata\antiiii\wacv_sam_output")
