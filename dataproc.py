@@ -3,6 +3,7 @@
 dataproc.py
 
 Multi-Dataset PCB Component & Defect Detection Pipeline using Pretrained Segment Anything Model (SAM):
+- LabelMe Exporter: Automatically exports SAM polygon overlays into LabelMe JSON format (.json)
 - Label Homogenizer Engine: Automatically maps messy multi-source labels (c, cap, resistor, MOSFET, chip, etc.)
   into unified KiCad Library Convention (KLC) Taxonomy ('Capacitor_SMD', 'Resistor_SMD', 'Package_SO', etc.)
 
@@ -18,7 +19,7 @@ Pipeline Workflow:
 3. Label Homogenization: Normalizes diverse raw labels into KiCad standard taxonomy.
 4. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
 5. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
-6. KiCad CSV Exporter: Saves polygon points to KiCad-formatted CSV (polygon_points.csv) and YOLO-seg (.txt).
+6. Multi-Format Exporter: Saves polygon points to LabelMe JSON (.json), CSV (polygon_points.csv), and YOLO-seg (.txt).
 7. Data Augmentation Engine: Applies polygon-aware spatial flips, rotations, and HSV color jitter.
 """
 
@@ -173,6 +174,44 @@ def extract_polygon_points(mask: np.ndarray, img_w: int, img_h: int):
             
     return polygon_lines
 
+def export_to_labelme_json(image_name, img_w, img_h, polygon_records, output_json_path):
+    """Exports SAM polygon points to standard LabelMe JSON format for interactive visual GUI editing."""
+    shapes = []
+    for rec in polygon_records:
+        raw_lbl = rec.get('raw_label', rec.get('class_id'))
+        kicad_name = homogenizer.homogenize(raw_lbl)
+        
+        pts_norm = rec['points']
+        pixel_pts = []
+        for i in range(0, len(pts_norm), 2):
+            px = round(pts_norm[i] * img_w, 2)
+            py = round(pts_norm[i+1] * img_h, 2)
+            pixel_pts.append([px, py])
+            
+        shapes.append({
+            "label": kicad_name,
+            "points": pixel_pts,
+            "group_id": None,
+            "description": "SAM Auto-Annotation Overlay",
+            "shape_type": "polygon",
+            "flags": {}
+        })
+        
+    labelme_data = {
+        "version": "5.0.1",
+        "flags": {},
+        "shapes": shapes,
+        "imagePath": image_name,
+        "imageData": None,
+        "imageHeight": img_h,
+        "imageWidth": img_w
+    }
+    
+    with open(output_json_path, "w", encoding="utf-8") as f:
+        json.dump(labelme_data, f, indent=2)
+        
+    return output_json_path
+
 def save_polygon_points_to_csv(extracted_records, output_csv_path):
     """Saves extracted SAM polygon (x, y) points into a CSV with KiCad standard class names."""
     rows = []
@@ -198,7 +237,7 @@ def save_polygon_points_to_csv(extracted_records, output_csv_path):
     return df
 
 def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
-    """Processes PCB dataset through SAM with cleaning, Label Homogenization, & CSV export."""
+    """Processes PCB dataset through SAM with cleaning, LabelMe JSON export, & CSV export."""
     download_sam_weights()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -212,8 +251,10 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
     labels_dir = dataset_dir / "labels"
     
     out_seg_dir = output_dir / "labels_yolo_seg"
+    out_labelme_dir = output_dir / "labels_labelme"
     out_vis_dir = output_dir / "visuals"
     out_seg_dir.mkdir(parents=True, exist_ok=True)
+    out_labelme_dir.mkdir(parents=True, exist_ok=True)
     out_vis_dir.mkdir(parents=True, exist_ok=True)
     
     img_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
@@ -248,6 +289,8 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
         cleaned_boxes = clean_bounding_boxes(boxes, w, h)
         
         yolo_seg_rows = []
+        img_records = []
+        
         for inst_idx, (box, raw_lbl) in enumerate(cleaned_boxes):
             input_box = np.array(box)
             masks, _, _ = predictor.predict(box=input_box[None, :], multimask_output=False)
@@ -258,18 +301,24 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
             
             for pts in polygons:
                 yolo_seg_rows.append(f"{std_cid} " + " ".join(map(str, pts)))
-                csv_records.append({
+                rec = {
                     'image_name': img_path.name,
                     'instance_id': inst_idx,
                     'raw_label': raw_lbl,
                     'class_id': std_cid,
                     'points': pts
-                })
+                }
+                csv_records.append(rec)
+                img_records.append(rec)
                 
+        # 1. Save YOLO-seg .txt label
         with open(out_seg_dir / f"{stem}.txt", "w") as f:
             f.write("\n".join(yolo_seg_rows))
             
-        print(f"Processed: {img_path.name} -> {len(yolo_seg_rows)} SAM polygons extracted & homogenized.")
+        # 2. Export LabelMe .json overlay file
+        export_to_labelme_json(img_path.name, w, h, img_records, out_labelme_dir / f"{stem}.json")
+            
+        print(f"Processed: {img_path.name} -> {len(yolo_seg_rows)} SAM polygons exported to YOLO & LabelMe JSON.")
         
     if csv_records:
         save_polygon_points_to_csv(csv_records, output_dir / "polygon_points.csv")
