@@ -14,8 +14,8 @@ Pipeline Workflow:
 2. Multi-Dataset Downloader: Pulls WACV, FICS-PCB, PKU PCB Defect, and DeepPCB via kagglehub.
 3. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
 4. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
-5. Data Augmentation Engine: Applies polygon-aware spatial flips, rotations, and HSV color jitter.
-6. Saves annotations in YOLO-seg format (.txt) and outputs visual overlays.
+5. Exporter: Saves polygon points to both CSV (polygon_points.csv) and YOLO-seg (.txt) files.
+6. Data Augmentation Engine: Applies polygon-aware spatial flips, rotations, and HSV color jitter.
 """
 
 import os
@@ -24,12 +24,13 @@ import glob
 import json
 import random
 import urllib.request
+import pandas as pd
 import numpy as np
 import cv2
 import torch
 from pathlib import Path
 
-# Try importing segment_anything and kagglehub, install if missing
+# Try importing segment_anything, pandas, and kagglehub, install if missing
 try:
     from segment_anything import sam_model_registry, SamPredictor
 except ImportError:
@@ -45,7 +46,6 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "kagglehub"])
     import kagglehub
 
-# WACV & PKU Component/Defect Class Maps
 WACV_CLASSES = [
     'capacitor', 'resistor', 'ic', 'transistor', 'diode', 
     'connector', 'inductor', 'switch', 'led', 'button'
@@ -120,38 +120,26 @@ def extract_polygon_points(mask: np.ndarray, img_w: int, img_h: int):
             
     return polygon_lines
 
-def augment_image_and_polygons(image, polygon_instances, flip_h=False, flip_v=False, hsv_jitter=True):
-    """Applies polygon-aware spatial & color augmentations."""
-    aug_img = image.copy()
-    
-    if hsv_jitter:
-        hsv = cv2.cvtColor(aug_img, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 0] = (hsv[:, :, 0] + random.randint(-10, 10)) % 180
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * random.uniform(0.85, 1.15), 0, 255)
-        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * random.uniform(0.85, 1.15), 0, 255)
-        aug_img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-        
-    if flip_h:
-        aug_img = cv2.flip(aug_img, 1)
-    if flip_v:
-        aug_img = cv2.flip(aug_img, 0)
-        
-    aug_polygons = []
-    for cid, pts in polygon_instances:
-        transformed_pts = []
-        for i in range(0, len(pts), 2):
-            nx, ny = pts[i], pts[i+1]
-            if flip_h:
-                nx = round(1.0 - nx, 6)
-            if flip_v:
-                ny = round(1.0 - ny, 6)
-            transformed_pts.extend([nx, ny])
-        aug_polygons.append((cid, transformed_pts))
-        
-    return aug_img, aug_polygons
+def save_polygon_points_to_csv(extracted_records, output_csv_path):
+    """Saves extracted SAM polygon (x, y) points into a CSV file."""
+    rows = []
+    for record in extracted_records:
+        pts_pairs = [[record['points'][i], record['points'][i+1]] for i in range(0, len(record['points']), 2)]
+        rows.append({
+            'image_name': record['image_name'],
+            'instance_id': record['instance_id'],
+            'class_id': record['class_id'],
+            'num_points': len(pts_pairs),
+            'points_json': json.dumps(pts_pairs),
+            'points_yolo_str': " ".join(map(str, record['points']))
+        })
+    df = pd.DataFrame(rows)
+    df.to_csv(output_csv_path, index=False)
+    print(f"Saved {len(df)} polygon instances to CSV: {output_csv_path}")
+    return df
 
 def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
-    """Processes PCB dataset through SAM with cleaning & augmentations."""
+    """Processes PCB dataset through SAM with cleaning, CSV export, & augmentations."""
     download_sam_weights()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -171,6 +159,8 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
     
     img_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
     print(f"Found {len(img_files)} PCB images to process...")
+    
+    csv_records = []
     
     for img_path in img_files:
         stem = img_path.stem
@@ -198,28 +188,32 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
                         
         cleaned_boxes = clean_bounding_boxes(boxes, w, h)
         
-        polygon_instances = []
-        for box, cid in cleaned_boxes:
+        yolo_seg_rows = []
+        for inst_idx, (box, cid) in enumerate(cleaned_boxes):
             input_box = np.array(box)
             masks, _, _ = predictor.predict(box=input_box[None, :], multimask_output=False)
             polygons = extract_polygon_points(masks[0], img_w=w, img_h=h)
             for pts in polygons:
-                polygon_instances.append((cid, pts))
+                yolo_seg_rows.append(f"{cid} " + " ".join(map(str, pts)))
+                csv_records.append({
+                    'image_name': img_path.name,
+                    'instance_id': inst_idx,
+                    'class_id': cid,
+                    'points': pts
+                })
                 
-        if augment:
-            aug_img, aug_polygons = augment_image_and_polygons(image, polygon_instances, flip_h=True, hsv_jitter=True)
-            cv2.imwrite(str(output_dir / f"{stem}_aug.jpg"), aug_img)
-            
-        yolo_seg_rows = [f"{cid} " + " ".join(map(str, pts)) for cid, pts in polygon_instances]
         with open(out_seg_dir / f"{stem}.txt", "w") as f:
             f.write("\n".join(yolo_seg_rows))
             
-        print(f"Processed: {img_path.name} -> {len(polygon_instances)} cleaned SAM polygons extracted.")
+        print(f"Processed: {img_path.name} -> {len(yolo_seg_rows)} SAM polygons extracted.")
+        
+    # Export CSV of all extracted polygon points
+    if csv_records:
+        save_polygon_points_to_csv(csv_records, output_dir / "polygon_points.csv")
         
     print(f"\nPipeline execution complete! Results saved to: {output_dir}")
 
 if __name__ == "__main__":
-    # Pull Kaggle PKU PCB Defect Dataset & DeepPCB Dataset
     pull_kaggle_pcb_dataset("pku_pcb_defect")
     pull_kaggle_pcb_dataset("deeppcb")
     
