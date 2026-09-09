@@ -3,6 +3,9 @@
 dataproc.py
 
 Multi-Dataset PCB Component & Defect Detection Pipeline using Pretrained Segment Anything Model (SAM):
+- Standardized Component Classes: KiCad Library Convention (KLC)
+  ('Capacitor_SMD', 'Resistor_SMD', 'Package_SO', 'Package_TO_SOT_SMD', 'Diode_SMD', 'Connector', etc.)
+
 - Supported Kaggle Datasets:
   1. WACV 2019 PCB Dataset
   2. Kaggle FICS-PCB Component Dataset (ficslab/fics-pcb)
@@ -14,7 +17,7 @@ Pipeline Workflow:
 2. Multi-Dataset Downloader: Pulls WACV, FICS-PCB, PKU PCB Defect, and DeepPCB via kagglehub.
 3. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
 4. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
-5. Exporter: Saves polygon points to both CSV (polygon_points.csv) and YOLO-seg (.txt) files.
+5. KiCad CSV Exporter: Saves polygon points to KiCad-formatted CSV (polygon_points.csv) and YOLO-seg (.txt).
 6. Data Augmentation Engine: Applies polygon-aware spatial flips, rotations, and HSV color jitter.
 """
 
@@ -46,9 +49,18 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "kagglehub"])
     import kagglehub
 
-WACV_CLASSES = [
-    'capacitor', 'resistor', 'ic', 'transistor', 'diode', 
-    'connector', 'inductor', 'switch', 'led', 'button'
+# KiCad Standard Footprint Class Names (KLC Format)
+KICAD_CLASSES = [
+    'Capacitor_SMD',
+    'Resistor_SMD',
+    'Package_SO',           # IC Small Outline
+    'Package_TO_SOT_SMD',   # Transistor / MOSFET
+    'Diode_SMD',
+    'Connector',
+    'Inductor_SMD',
+    'Button_Switch_SMD',
+    'LED_SMD',
+    'Transformer_SMD'
 ]
 
 KAGGLE_DATASETS = {
@@ -121,25 +133,28 @@ def extract_polygon_points(mask: np.ndarray, img_w: int, img_h: int):
     return polygon_lines
 
 def save_polygon_points_to_csv(extracted_records, output_csv_path):
-    """Saves extracted SAM polygon (x, y) points into a CSV file."""
+    """Saves extracted SAM polygon (x, y) points into a CSV with KiCad standard class names."""
     rows = []
     for record in extracted_records:
+        cid = record['class_id']
+        kicad_name = KICAD_CLASSES[cid] if cid < len(KICAD_CLASSES) else f"Class_{cid}"
         pts_pairs = [[record['points'][i], record['points'][i+1]] for i in range(0, len(record['points']), 2)]
         rows.append({
             'image_name': record['image_name'],
             'instance_id': record['instance_id'],
-            'class_id': record['class_id'],
+            'class_id': cid,
+            'kicad_class_name': kicad_name,
             'num_points': len(pts_pairs),
             'points_json': json.dumps(pts_pairs),
             'points_yolo_str': " ".join(map(str, record['points']))
         })
     df = pd.DataFrame(rows)
     df.to_csv(output_csv_path, index=False)
-    print(f"Saved {len(df)} polygon instances to CSV: {output_csv_path}")
+    print(f"Saved {len(df)} polygon instances to KiCad CSV: {output_csv_path}")
     return df
 
 def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
-    """Processes PCB dataset through SAM with cleaning, CSV export, & augmentations."""
+    """Processes PCB dataset through SAM with cleaning, KiCad CSV export, & augmentations."""
     download_sam_weights()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -207,7 +222,6 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
             
         print(f"Processed: {img_path.name} -> {len(yolo_seg_rows)} SAM polygons extracted.")
         
-    # Export CSV of all extracted polygon points
     if csv_records:
         save_polygon_points_to_csv(csv_records, output_dir / "polygon_points.csv")
         
