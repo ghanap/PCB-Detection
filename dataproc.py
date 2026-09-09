@@ -3,8 +3,8 @@
 dataproc.py
 
 Multi-Dataset PCB Component & Defect Detection Pipeline using Pretrained Segment Anything Model (SAM):
-- Standardized Component Classes: KiCad Library Convention (KLC)
-  ('Capacitor_SMD', 'Resistor_SMD', 'Package_SO', 'Package_TO_SOT_SMD', 'Diode_SMD', 'Connector', etc.)
+- Label Homogenizer Engine: Automatically maps messy multi-source labels (c, cap, resistor, MOSFET, chip, etc.)
+  into unified KiCad Library Convention (KLC) Taxonomy ('Capacitor_SMD', 'Resistor_SMD', 'Package_SO', etc.)
 
 - Supported Kaggle Datasets:
   1. WACV 2019 PCB Dataset
@@ -15,10 +15,11 @@ Multi-Dataset PCB Component & Defect Detection Pipeline using Pretrained Segment
 Pipeline Workflow:
 1. Downloads SAM ViT-B pretrained weights (sam_vit_b.pth).
 2. Multi-Dataset Downloader: Pulls WACV, FICS-PCB, PKU PCB Defect, and DeepPCB via kagglehub.
-3. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
-4. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
-5. KiCad CSV Exporter: Saves polygon points to KiCad-formatted CSV (polygon_points.csv) and YOLO-seg (.txt).
-6. Data Augmentation Engine: Applies polygon-aware spatial flips, rotations, and HSV color jitter.
+3. Label Homogenization: Normalizes diverse raw labels into KiCad standard taxonomy.
+4. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
+5. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
+6. KiCad CSV Exporter: Saves polygon points to KiCad-formatted CSV (polygon_points.csv) and YOLO-seg (.txt).
+7. Data Augmentation Engine: Applies polygon-aware spatial flips, rotations, and HSV color jitter.
 """
 
 import os
@@ -60,8 +61,48 @@ KICAD_CLASSES = [
     'Inductor_SMD',
     'Button_Switch_SMD',
     'LED_SMD',
-    'Transformer_SMD'
+    'Transformer_SMD',
+    'PCB_Defect',
+    'Unknown_Component'
 ]
+
+LABEL_SYNONYMS = {
+    'Capacitor_SMD': ['c', 'cap', 'capacitor', 'capacitors', 'c_smd', 'c_tht', 'cap1', 'cap2', 'cap3', 'cap4'],
+    'Resistor_SMD': ['r', 'res', 'resistor', 'resistors', 'r_smd', 'r_tht'],
+    'Package_SO': ['ic', 'chip', 'integrated_circuit', 'soic', 'sop', 'qfp', 'qfn', 'dip', 'mcu'],
+    'Package_TO_SOT_SMD': ['q', 'transistor', 'mosfet', 'fet', 'bjt', 'sot', 'sot23', 'to220', 'dopak', 'mov'],
+    'Diode_SMD': ['d', 'diode', 'diodes', 'zener', 'schottky', 'tvs'],
+    'Connector': ['conn', 'connector', 'connectors', 'header', 'plug', 'jack', 'usb', 'terminal'],
+    'Inductor_SMD': ['l', 'ind', 'inductor', 'choke', 'coil'],
+    'Button_Switch_SMD': ['sw', 'switch', 'button', 'btn', 'tactile', 'toggle'],
+    'LED_SMD': ['led', 'leds', 'light_emitting_diode'],
+    'Transformer_SMD': ['t', 'transformer', 'xfmr'],
+    'PCB_Defect': ['defect', 'open', 'short', 'mousebite', 'spur', 'pin-hole', 'spurious_copper']
+}
+
+class LabelHomogenizer:
+    """Normalizes multi-dataset component & defect labels into a unified KiCad taxonomy."""
+    def __init__(self):
+        self.lookup = {}
+        for std_name, synonyms in LABEL_SYNONYMS.items():
+            for syn in synonyms:
+                self.lookup[syn.lower()] = std_name
+                
+    def homogenize(self, raw_label):
+        if isinstance(raw_label, int):
+            return KICAD_CLASSES[raw_label] if raw_label < len(KICAD_CLASSES) else f"Class_{raw_label}"
+            
+        cleaned = str(raw_label).strip().lower()
+        if cleaned in self.lookup:
+            return self.lookup[cleaned]
+            
+        for syn, std_name in self.lookup.items():
+            if syn in cleaned:
+                return std_name
+                
+        return f"Unknown_{raw_label}"
+
+homogenizer = LabelHomogenizer()
 
 KAGGLE_DATASETS = {
     "fics_pcb": "ficslab/fics-pcb",                 # PCB Component Detection
@@ -97,7 +138,7 @@ def pull_kaggle_pcb_dataset(name="pku_pcb_defect"):
 def clean_bounding_boxes(boxes, img_w, img_h, min_box_size=10):
     """Cleans and filters out invalid or out-of-bounds bounding boxes."""
     cleaned_boxes = []
-    for box, cid in boxes:
+    for box, raw_lbl in boxes:
         x1, y1, x2, y2 = box
         x1 = max(0, min(x1, img_w - 1))
         y1 = max(0, min(y1, img_h - 1))
@@ -107,7 +148,7 @@ def clean_bounding_boxes(boxes, img_w, img_h, min_box_size=10):
         bw = x2 - x1
         bh = y2 - y1
         if bw >= min_box_size and bh >= min_box_size:
-            cleaned_boxes.append(([x1, y1, x2, y2], cid))
+            cleaned_boxes.append(([x1, y1, x2, y2], raw_lbl))
     return cleaned_boxes
 
 def extract_polygon_points(mask: np.ndarray, img_w: int, img_h: int):
@@ -136,25 +177,28 @@ def save_polygon_points_to_csv(extracted_records, output_csv_path):
     """Saves extracted SAM polygon (x, y) points into a CSV with KiCad standard class names."""
     rows = []
     for record in extracted_records:
-        cid = record['class_id']
-        kicad_name = KICAD_CLASSES[cid] if cid < len(KICAD_CLASSES) else f"Class_{cid}"
+        raw_lbl = record.get('raw_label', record.get('class_id'))
+        std_kicad_label = homogenizer.homogenize(raw_lbl)
+        std_cid = KICAD_CLASSES.index(std_kicad_label) if std_kicad_label in KICAD_CLASSES else 11
+        
         pts_pairs = [[record['points'][i], record['points'][i+1]] for i in range(0, len(record['points']), 2)]
         rows.append({
             'image_name': record['image_name'],
             'instance_id': record['instance_id'],
-            'class_id': cid,
-            'kicad_class_name': kicad_name,
+            'raw_label': raw_lbl,
+            'homogenized_class_id': std_cid,
+            'kicad_class_name': std_kicad_label,
             'num_points': len(pts_pairs),
             'points_json': json.dumps(pts_pairs),
-            'points_yolo_str': " ".join(map(str, record['points']))
+            'points_yolo_str': f"{std_cid} " + " ".join(map(str, record['points']))
         })
     df = pd.DataFrame(rows)
     df.to_csv(output_csv_path, index=False)
-    print(f"Saved {len(df)} polygon instances to KiCad CSV: {output_csv_path}")
+    print(f"Saved {len(df)} polygon instances to Homogenized KiCad CSV: {output_csv_path}")
     return df
 
 def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
-    """Processes PCB dataset through SAM with cleaning, KiCad CSV export, & augmentations."""
+    """Processes PCB dataset through SAM with cleaning, Label Homogenization, & CSV export."""
     download_sam_weights()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -193,34 +237,39 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
                 for line in f:
                     parts = line.strip().split()
                     if len(parts) >= 5:
-                        cid = int(float(parts[0]))
+                        raw_cid = parts[0]
                         xc, yc, bw, bh = map(float, parts[1:5])
                         x1 = max(0, (xc - bw / 2) * w)
                         y1 = max(0, (yc - bh / 2) * h)
                         x2 = min(w, (xc + bw / 2) * w)
                         y2 = min(h, (yc + bh / 2) * h)
-                        boxes.append(([x1, y1, x2, y2], cid))
+                        boxes.append(([x1, y1, x2, y2], raw_cid))
                         
         cleaned_boxes = clean_bounding_boxes(boxes, w, h)
         
         yolo_seg_rows = []
-        for inst_idx, (box, cid) in enumerate(cleaned_boxes):
+        for inst_idx, (box, raw_lbl) in enumerate(cleaned_boxes):
             input_box = np.array(box)
             masks, _, _ = predictor.predict(box=input_box[None, :], multimask_output=False)
             polygons = extract_polygon_points(masks[0], img_w=w, img_h=h)
+            
+            std_kicad_name = homogenizer.homogenize(raw_lbl)
+            std_cid = KICAD_CLASSES.index(std_kicad_name) if std_kicad_name in KICAD_CLASSES else 11
+            
             for pts in polygons:
-                yolo_seg_rows.append(f"{cid} " + " ".join(map(str, pts)))
+                yolo_seg_rows.append(f"{std_cid} " + " ".join(map(str, pts)))
                 csv_records.append({
                     'image_name': img_path.name,
                     'instance_id': inst_idx,
-                    'class_id': cid,
+                    'raw_label': raw_lbl,
+                    'class_id': std_cid,
                     'points': pts
                 })
                 
         with open(out_seg_dir / f"{stem}.txt", "w") as f:
             f.write("\n".join(yolo_seg_rows))
             
-        print(f"Processed: {img_path.name} -> {len(yolo_seg_rows)} SAM polygons extracted.")
+        print(f"Processed: {img_path.name} -> {len(yolo_seg_rows)} SAM polygons extracted & homogenized.")
         
     if csv_records:
         save_polygon_points_to_csv(csv_records, output_dir / "polygon_points.csv")
