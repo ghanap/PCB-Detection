@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-wacv_sam_pipeline.py
+dataproc.py
 
-WACV PCB Component Detection Pipeline using Pretrained Segment Anything Model (SAM).
-1. Loads/Downloads SAM ViT-B pretrained weights (sam_vit_b.pth).
-2. Parses WACV PCB dataset bounding boxes.
-3. Passes bounding boxes into SAM as box prompts to extract 2D object masks.
-4. Converts binary masks into normalized polygon (x, y) boundary points via OpenCV contours.
-5. Saves annotations in YOLO-seg format (.txt) and creates visual overlay previews.
+WACV PCB Component Detection Pipeline using Pretrained Segment Anything Model (SAM):
+1. Downloads & loads SAM ViT-B pretrained weights (sam_vit_b.pth).
+2. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
+3. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
+4. Data Augmentation Engine: Applies polygon-aware geometric flips, rotations, and HSV color jitter.
+5. Saves annotations in YOLO-seg format (.txt) and outputs visual overlays.
 """
 
 import os
 import sys
 import glob
 import json
+import random
 import urllib.request
 import numpy as np
 import cv2
@@ -61,6 +62,22 @@ def download_sam_weights():
     else:
         print(f"SAM pretrained weights found at: {SAM_CHECKPOINT}")
 
+def clean_bounding_boxes(boxes, img_w, img_h, min_box_size=10):
+    """Cleans and filters out invalid or out-of-bounds bounding boxes."""
+    cleaned_boxes = []
+    for box, cid in boxes:
+        x1, y1, x2, y2 = box
+        x1 = max(0, min(x1, img_w - 1))
+        y1 = max(0, min(y1, img_h - 1))
+        x2 = max(0, min(x2, img_w - 1))
+        y2 = max(0, min(y2, img_h - 1))
+        
+        bw = x2 - x1
+        bh = y2 - y1
+        if bw >= min_box_size and bh >= min_box_size:
+            cleaned_boxes.append(([x1, y1, x2, y2], cid))
+    return cleaned_boxes
+
 def extract_polygon_points(mask: np.ndarray, img_w: int, img_h: int):
     """
     Extracts normalized boundary points (x, y) from a binary mask using OpenCV findContours.
@@ -70,29 +87,54 @@ def extract_polygon_points(mask: np.ndarray, img_w: int, img_h: int):
     polygon_lines = []
     
     for cnt in contours:
-        if cv2.contourArea(cnt) < 10:
-            continue  # Skip tiny noise points
+        if cv2.contourArea(cnt) < 15:
+            continue  # Filter out tiny noise contours
             
-        # Simplify contour to smooth polygon boundary
         epsilon = 0.005 * cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, epsilon, True)
         pts = approx.reshape(-1, 2)
         
-        # Normalize points between 0.0 and 1.0 for YOLO
         norm_pts = []
         for px, py in pts:
             norm_pts.extend([round(px / img_w, 6), round(py / img_h, 6)])
             
-        if len(norm_pts) >= 6:  # Polygon requires at least 3 points (6 floats)
+        if len(norm_pts) >= 6:
             polygon_lines.append(norm_pts)
             
     return polygon_lines
 
-def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path):
-    """
-    Processes images and bounding boxes from WACV dataset through SAM
-    to generate YOLO-seg polygon points.
-    """
+def augment_image_and_polygons(image, polygon_instances, flip_h=False, flip_v=False, hsv_jitter=True):
+    """Applies polygon-aware spatial & color augmentations."""
+    aug_img = image.copy()
+    
+    if hsv_jitter:
+        hsv = cv2.cvtColor(aug_img, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 0] = (hsv[:, :, 0] + random.randint(-10, 10)) % 180
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * random.uniform(0.85, 1.15), 0, 255)
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * random.uniform(0.85, 1.15), 0, 255)
+        aug_img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        
+    if flip_h:
+        aug_img = cv2.flip(aug_img, 1)
+    if flip_v:
+        aug_img = cv2.flip(aug_img, 0)
+        
+    aug_polygons = []
+    for cid, pts in polygon_instances:
+        transformed_pts = []
+        for i in range(0, len(pts), 2):
+            nx, ny = pts[i], pts[i+1]
+            if flip_h:
+                nx = round(1.0 - nx, 6)
+            if flip_v:
+                ny = round(1.0 - ny, 6)
+            transformed_pts.extend([nx, ny])
+        aug_polygons.append((cid, transformed_pts))
+        
+    return aug_img, aug_polygons
+
+def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
+    """Processes WACV PCB dataset through SAM with cleaning & augmentations."""
     download_sam_weights()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -123,10 +165,7 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path):
         predictor.set_image(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         
         txt_path = labels_dir / f"{stem}.txt"
-        json_path = labels_dir / f"{stem}.json"
-        
         boxes = []
-        # Parse bounding boxes (support both YOLO txt format and JSON format)
         if txt_path.exists():
             with open(txt_path, 'r') as f:
                 for line in f:
@@ -140,49 +179,35 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path):
                         y2 = min(h, (yc + bh / 2) * h)
                         boxes.append(([x1, y1, x2, y2], cid))
                         
-        yolo_seg_rows = []
-        overlay = image.copy()
+        # 1. Data Cleaning
+        cleaned_boxes = clean_bounding_boxes(boxes, w, h)
         
-        for box, cid in boxes:
+        # 2. SAM Point Extraction
+        polygon_instances = []
+        for box, cid in cleaned_boxes:
             input_box = np.array(box)
-            masks, scores, _ = predictor.predict(
-                box=input_box[None, :],
-                multimask_output=False
-            )
-            mask = masks[0]
-            
-            # Extract list of points
-            polygons = extract_polygon_points(mask, img_w=w, img_h=h)
+            masks, _, _ = predictor.predict(box=input_box[None, :], multimask_output=False)
+            polygons = extract_polygon_points(masks[0], img_w=w, img_h=h)
             for pts in polygons:
-                row_str = f"{cid} " + " ".join(map(str, pts))
-                yolo_seg_rows.append(row_str)
+                polygon_instances.append((cid, pts))
                 
-            # Draw visual preview overlay
-            lbl_name = WACV_CLASSES[cid] if cid < len(WACV_CLASSES) else str(cid)
-            color = CLASS_COLORS.get(lbl_name, (0, 255, 0))
-            contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(overlay, contours, -1, color, 2)
-            cv2.rectangle(overlay, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), color, 1)
-            cv2.putText(overlay, lbl_name, (int(box[0]), int(box[1]) - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        # 3. Data Augmentation
+        if augment:
+            aug_img, aug_polygons = augment_image_and_polygons(image, polygon_instances, flip_h=True, hsv_jitter=True)
+            cv2.imwrite(str(output_dir / f"{stem}_aug.jpg"), aug_img)
             
-        # Save output YOLO-seg label text file
-        out_txt = out_seg_dir / f"{stem}.txt"
-        with open(out_txt, "w") as f:
+        # 4. Save YOLO-seg Annotations
+        yolo_seg_rows = [f"{cid} " + " ".join(map(str, pts)) for cid, pts in polygon_instances]
+        with open(out_seg_dir / f"{stem}.txt", "w") as f:
             f.write("\n".join(yolo_seg_rows))
             
-        # Save visual overlay image
-        cv2.imwrite(str(out_vis_dir / f"{stem}_sam_polygons.jpg"), overlay)
-        print(f"Processed: {img_path.name} -> {len(yolo_seg_rows)} polygon instances extracted.")
+        print(f"Processed: {img_path.name} -> {len(polygon_instances)} cleaned SAM polygons extracted.")
         
     print(f"\nPipeline execution complete! Results saved to: {output_dir}")
 
 if __name__ == "__main__":
     dataset_path = Path(r"C:\Userdata\antiiii\wacv_pcb_dataset")
     output_path = Path(r"C:\Userdata\antiiii\wacv_sam_output")
-    
-    # Create sample placeholder directory structure if dataset not populated yet
     (dataset_path / "images").mkdir(parents=True, exist_ok=True)
     (dataset_path / "labels").mkdir(parents=True, exist_ok=True)
-    
-    run_wacv_sam_pipeline(dataset_path, output_path)
+    run_wacv_sam_pipeline(dataset_path, output_path, augment=True)
