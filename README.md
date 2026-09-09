@@ -10,8 +10,13 @@ SAM-based auto-annotation and polygon point extraction for PCB component detecti
 [Launch in Colab](https://colab.research.google.com/github/ghanap/PCB-Detection/blob/main/dataproc.ipynb)
 
 ### Kaggle
-Import Notebook URL:
-`https://github.com/ghanap/PCB-Detection/blob/main/dataproc.ipynb`
+1. Import notebook URL:
+   `https://github.com/ghanap/PCB-Detection/blob/main/dataproc.ipynb`
+2. Download any Kaggle dataset in code:
+   ```python
+   import kagglehub
+   dataset_path = kagglehub.dataset_download("owner/dataset-slug")
+   ```
 
 ### Local
 ```bash
