@@ -9,9 +9,9 @@ import os
 import sys
 import glob
 import json
+import csv
 import random
 import urllib.request
-import pandas as pd
 import numpy as np
 import cv2
 import torch
@@ -181,31 +181,31 @@ def export_to_labelme_json(image_name, img_w, img_h, polygon_records, output_jso
     return output_json_path
 
 def save_polygon_points_to_csv(extracted_records, output_csv_path):
-    rows = []
-    for record in extracted_records:
-        raw_lbl = record.get('raw_label', record.get('class_id'))
-        std_kicad_label = homogenizer.homogenize(raw_lbl)
-        std_cid = KICAD_CLASSES.index(std_kicad_label) if std_kicad_label in KICAD_CLASSES else 11
-        
-        pts_pairs = [[record['points'][i], record['points'][i+1]] for i in range(0, len(record['points']), 2)]
-        rows.append({
-            'image_name': record['image_name'],
-            'instance_id': record['instance_id'],
-            'raw_label': raw_lbl,
-            'homogenized_class_id': std_cid,
-            'kicad_class_name': std_kicad_label,
-            'num_points': len(pts_pairs),
-            'points_json': json.dumps(pts_pairs),
-            'points_yolo_str': f"{std_cid} " + " ".join(map(str, record['points']))
-        })
-    df = pd.DataFrame(rows)
-    df.to_csv(output_csv_path, index=False)
-    return df
+    fieldnames = ['image_name', 'instance_id', 'raw_label', 'homogenized_class_id', 'kicad_class_name', 'num_points', 'points_json', 'points_yolo_str']
+    with open(output_csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in extracted_records:
+            raw_lbl = record.get('raw_label', record.get('class_id'))
+            std_kicad_label = homogenizer.homogenize(raw_lbl)
+            std_cid = KICAD_CLASSES.index(std_kicad_label) if std_kicad_label in KICAD_CLASSES else 11
+            pts_pairs = [[record['points'][i], record['points'][i+1]] for i in range(0, len(record['points']), 2)]
+            writer.writerow({
+                'image_name': record['image_name'],
+                'instance_id': record['instance_id'],
+                'raw_label': raw_lbl,
+                'homogenized_class_id': std_cid,
+                'kicad_class_name': std_kicad_label,
+                'num_points': len(pts_pairs),
+                'points_json': json.dumps(pts_pairs),
+                'points_yolo_str': f"{std_cid} " + " ".join(map(str, record['points']))
+            })
 
 def run_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
     download_sam_weights()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Initializing SAM on device: {device}...")
     sam = sam_model_registry["vit_b"](checkpoint=str(SAM_CHECKPOINT))
     sam.to(device=device)
     sam.eval()
@@ -222,6 +222,7 @@ def run_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
     out_vis_dir.mkdir(parents=True, exist_ok=True)
     
     img_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
+    print(f"Found {len(img_files)} PCB images.")
     csv_records = []
     
     for img_path in img_files:
@@ -280,6 +281,7 @@ def run_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = True):
         
     if csv_records:
         save_polygon_points_to_csv(csv_records, output_dir / "polygon_points.csv")
+    print(f"Pipeline complete! Output saved to: {output_dir}")
 
 if __name__ == "__main__":
     dataset_path = Path(r"C:\Userdata\antiiii\pcb_dataset")
