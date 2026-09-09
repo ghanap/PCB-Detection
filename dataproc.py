@@ -2,12 +2,13 @@
 """
 dataproc.py
 
-WACV PCB Component Detection Pipeline using Pretrained Segment Anything Model (SAM):
+Multi-Dataset PCB Component Detection Pipeline using Pretrained Segment Anything Model (SAM):
 1. Downloads & loads SAM ViT-B pretrained weights (sam_vit_b.pth).
-2. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
-3. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
-4. Data Augmentation Engine: Applies polygon-aware geometric flips, rotations, and HSV color jitter.
-5. Saves annotations in YOLO-seg format (.txt) and outputs visual overlays.
+2. Dataset Downloader: Pulls WACV and Kaggle PCB datasets using kagglehub / URLs.
+3. Data Cleaning: Filters out invalid bounding boxes, corrupt images, and tiny noise contours.
+4. SAM Point Extractor: Converts SAM binary masks (0s & 1s) into normalized polygon points (x, y).
+5. Data Augmentation Engine: Applies polygon-aware spatial flips, rotations, and HSV color jitter.
+6. Saves annotations in YOLO-seg format (.txt) and outputs visual overlays.
 """
 
 import os
@@ -21,7 +22,7 @@ import cv2
 import torch
 from pathlib import Path
 
-# Try importing segment_anything, install if missing
+# Try importing segment_anything and kagglehub, install if missing
 try:
     from segment_anything import sam_model_registry, SamPredictor
 except ImportError:
@@ -29,6 +30,13 @@ except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "git+https://github.com/facebookresearch/segment-anything.git"])
     from segment_anything import sam_model_registry, SamPredictor
+
+try:
+    import kagglehub
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "kagglehub"])
+    import kagglehub
 
 # WACV 2019 PCB Component Class Map
 WACV_CLASSES = [
@@ -61,6 +69,17 @@ def download_sam_weights():
         print("SAM weights download complete!")
     else:
         print(f"SAM pretrained weights found at: {SAM_CHECKPOINT}")
+
+def pull_kaggle_pcb_dataset(dataset_slug="ficslab/fics-pcb"):
+    """Downloads PCB dataset from Kaggle via kagglehub."""
+    print(f"Pulling Kaggle PCB dataset '{dataset_slug}' via kagglehub...")
+    try:
+        path = kagglehub.dataset_download(dataset_slug)
+        print(f"Kaggle dataset downloaded to: {path}")
+        return Path(path)
+    except Exception as e:
+        print(f"Note on Kaggle Download: {e}")
+        return None
 
 def clean_bounding_boxes(boxes, img_w, img_h, min_box_size=10):
     """Cleans and filters out invalid or out-of-bounds bounding boxes."""
@@ -179,10 +198,8 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
                         y2 = min(h, (yc + bh / 2) * h)
                         boxes.append(([x1, y1, x2, y2], cid))
                         
-        # 1. Data Cleaning
         cleaned_boxes = clean_bounding_boxes(boxes, w, h)
         
-        # 2. SAM Point Extraction
         polygon_instances = []
         for box, cid in cleaned_boxes:
             input_box = np.array(box)
@@ -191,12 +208,10 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
             for pts in polygons:
                 polygon_instances.append((cid, pts))
                 
-        # 3. Data Augmentation
         if augment:
             aug_img, aug_polygons = augment_image_and_polygons(image, polygon_instances, flip_h=True, hsv_jitter=True)
             cv2.imwrite(str(output_dir / f"{stem}_aug.jpg"), aug_img)
             
-        # 4. Save YOLO-seg Annotations
         yolo_seg_rows = [f"{cid} " + " ".join(map(str, pts)) for cid, pts in polygon_instances]
         with open(out_seg_dir / f"{stem}.txt", "w") as f:
             f.write("\n".join(yolo_seg_rows))
@@ -206,6 +221,9 @@ def run_wacv_sam_pipeline(dataset_dir: Path, output_dir: Path, augment: bool = T
     print(f"\nPipeline execution complete! Results saved to: {output_dir}")
 
 if __name__ == "__main__":
+    # Option to pull Kaggle PCB dataset
+    pull_kaggle_pcb_dataset("ficslab/fics-pcb")
+    
     dataset_path = Path(r"C:\Userdata\antiiii\wacv_pcb_dataset")
     output_path = Path(r"C:\Userdata\antiiii\wacv_sam_output")
     (dataset_path / "images").mkdir(parents=True, exist_ok=True)
