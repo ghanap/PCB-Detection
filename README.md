@@ -1,21 +1,19 @@
 # PCB Component Detection & SAM Polygon Point Extractor
 
-A minimalist, high-precision pipeline for Printed Circuit Board (PCB) component segmentation, polygon point extraction, and KiCad footprint mapping using Meta's Segment Anything Model (SAM ViT-B).
+Pipeline for Printed Circuit Board (PCB) component segmentation, polygon point extraction, and KiCad footprint mapping using Meta's Segment Anything Model (SAM ViT-B).
 
----
-
-## 📁 Repository Structure
+## Repository Structure
 
 ```text
 PCB-Detection/
-├── run_sam.py              # Ingests any PCB image & bboxes, extracts SAM polygon points, exports CSV/Excel & LabelMe
-├── run_sam.ipynb           # Interactive notebook for SAM point extraction & visualization
+├── run_sam.py              # Ingests PCB images & bboxes, extracts SAM polygon points, exports CSV/Excel & LabelMe
+├── run_sam.ipynb           # Notebook for SAM point extraction
 │
 ├── clean_kaggle.py         # Cleaning & SAM extraction pipeline for Kaggle / FICS dataset
-├── clean_kaggle.ipynb      # Interactive notebook for Kaggle dataset cleaning
+├── clean_kaggle.ipynb      # Notebook for Kaggle dataset cleaning
 │
 ├── clean_wacv.py           # Cleaning & SAM extraction pipeline for WACV 2019 dataset
-├── clean_wacv.ipynb        # Interactive notebook for WACV dataset cleaning
+├── clean_wacv.ipynb        # Notebook for WACV dataset cleaning
 │
 ├── outputs/                # Generated point spreadsheets
 │   ├── kaggle_sam_output_points.csv
@@ -27,9 +25,7 @@ PCB-Detection/
 └── .gitignore
 ```
 
----
-
-## 🚀 Quick Start
+## Usage
 
 ### 1. Run SAM & Extract Polygon Points
 ```bash
@@ -38,7 +34,7 @@ python run_sam.py --image <path_to_image> --labels <path_to_yolo_labels>
 * Prompts SAM with component bounding boxes.
 * Extracts polygon boundary points `[(x, y), ...]`.
 * Saves results to `sam_output_points.xlsx` and `sam_output_points.csv`.
-* Automatically creates LabelMe JSON with `Ref_Des: Class` tags.
+* Creates LabelMe JSON with `Ref_Des: Class` tags.
 
 ### 2. Clean Kaggle / FICS Dataset
 ```bash
@@ -52,18 +48,16 @@ python clean_kaggle.py
 ```bash
 python clean_wacv.py --board-dir <path_to_wacv_board_folder>
 ```
-* Parses Pascal VOC XML annotations, skipping non-component silkscreen `text` and `pads`.
+* Parses Pascal VOC XML annotations, skipping silkscreen `text` and `pads`.
 * Cleans bounding boxes (`ic`, `connector`, `led`, `resistor`, `capacitor`, `diode`, `clock`, etc.).
-* Extracts exact SAM polygon masks and exports to CSV / Excel / LabelMe.
+* Extracts SAM polygon masks and exports to CSV, Excel, and LabelMe.
 
----
+## Output Format
 
-## 📊 Extracted Point Format
-
-All output CSV and Excel spreadsheets contain:
-* `ref_des`: Standard Reference Designator (`R1`, `C1`, `U1`, `J1`, `Q1`, `T1`...)
+Output CSV and Excel spreadsheets contain:
+* `ref_des`: Reference Designator (`R1`, `C1`, `U1`, `J1`, `Q1`, `T1`...)
 * `class_name`: Component class
-* `kicad_footprint`: Standard KiCad Library Convention footprint
+* `kicad_footprint`: KiCad footprint identifier
 * `confidence`: SAM segmentation confidence score
 * `num_polygon_points`: Number of vertices
 * `polygon_points_compact`: String format `(x1,y1); (x2,y2); ...`
