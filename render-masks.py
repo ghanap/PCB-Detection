@@ -7,7 +7,7 @@ semi-transparent colored mask overlays on the original PCB images.
 
 Input: directory containing image files and matching .json files
        (as produced by run_sam.py or clean-and-segment-pipeline.py)
-Output: <stem>-masked.png for each image, saved to --output dir
+Output: <stem>-masked.jpg for each image, saved to --output dir
 
 Usage:
   python render-masks.py --input path/to/sam-results --output path/to/masked-output
@@ -175,7 +175,7 @@ def process_directory(input_dir: Path, output_dir: Path, alpha: float = 0.45):
 
         result = render_masked_image(img, shapes, alpha=alpha)
 
-        out_name = f"{jf.stem}-masked.png"
+        out_name = f"{jf.stem}-masked.jpg"
         out_path = output_dir / out_name
         cv2.imwrite(str(out_path), result)
 
