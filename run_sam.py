@@ -189,20 +189,135 @@ def run_sam(
 
     print("=" * 75)
 
+def run_batch_sam(
+    source_dir: Path,
+    labels_dir: Path,
+    sam_checkpoint: Path,
+    output_dir: Path,
+    limit: int = None
+):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    img_files = sorted(list(source_dir.glob("*.jpg")) + list(source_dir.glob("*.png")))
+    if limit:
+        img_files = img_files[:limit]
+
+    print(f"Running SAM across {len(img_files)} images from: {source_dir}")
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading SAM ({sam_checkpoint}) on {device}...")
+    sam = sam_model_registry["vit_b"](checkpoint=str(sam_checkpoint))
+    sam.to(device=device)
+    sam.eval()
+    predictor = SamPredictor(sam)
+
+    all_records = []
+    for idx, img_p in enumerate(img_files, 1):
+        lbl_p = labels_dir / f"{img_p.stem}.txt"
+        if not lbl_p.exists():
+            continue
+        img = cv2.imread(str(img_p))
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+
+        boxes = []
+        with open(lbl_p, "r") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    cid = int(float(parts[0]))
+                    xc, yc, bw, bh = map(float, parts[1:5])
+                    x1 = max(0, int(round((xc - bw / 2.0) * w)))
+                    y1 = max(0, int(round((yc - bh / 2.0) * h)))
+                    x2 = min(w, int(round((xc + bw / 2.0) * w)))
+                    y2 = min(h, int(round((yc + bh / 2.0) * h)))
+                    if x2 > x1 + 4 and y2 > y1 + 4:
+                        boxes.append(([x1, y1, x2, y2], cid))
+
+        if not boxes:
+            continue
+
+        predictor.set_image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        shapes = []
+        ref_counts = {}
+        for b_idx, (b, cid) in enumerate(boxes, 1):
+            masks, scores, _ = predictor.predict(box=np.array(b)[None, :], multimask_output=False)
+            conf = float(scores[0])
+            pts = extract_polygon_points(masks[0])
+            if not pts:
+                pts = [[float(b[0]), float(b[1])], [float(b[2]), float(b[1])], [float(b[2]), float(b[3])], [float(b[0]), float(b[3])]]
+
+            class_name = CLASS_MAP.get(cid, f"Class_{cid}")
+            prefix = PREFIX_MAP.get(class_name, "U")
+            ref_counts[prefix] = ref_counts.get(prefix, 0) + 1
+            ref_des = f"{prefix}{ref_counts[prefix]}"
+
+            all_records.append({
+                "image_name": img_p.name,
+                "instance_id": b_idx,
+                "ref_des": ref_des,
+                "class_name": class_name,
+                "box_x1": b[0], "box_y1": b[1], "box_x2": b[2], "box_y2": b[3],
+                "confidence": round(conf, 3),
+                "num_polygon_points": len(pts),
+                "polygon_points": json.dumps(pts)
+            })
+            shapes.append({
+                "label": f"{ref_des}: {class_name}",
+                "points": pts,
+                "shape_type": "polygon"
+            })
+
+        # Save image copy and LabelMe json
+        shutil.copy2(img_p, output_dir / img_p.name)
+        with open(output_dir / f"{img_p.stem}.json", "w", encoding="utf-8") as f:
+            json.dump({
+                "version": "5.5.0",
+                "flags": {},
+                "shapes": shapes,
+                "imagePath": img_p.name,
+                "imageData": None,
+                "imageHeight": h,
+                "imageWidth": w
+            }, f, indent=2)
+
+        if idx % 10 == 0 or idx == len(img_files):
+            print(f"[{idx}/{len(img_files)}] Processed {img_p.name} | Total extracted: {len(all_records)}")
+            df = pd.DataFrame(all_records)
+            df.to_csv(output_dir / "dataset_sam_points.csv", index=False)
+            df.to_excel(output_dir / "dataset_sam_points.xlsx", index=False)
+
+    print(f"\nCompleted! Total components: {len(all_records)} saved to {output_dir}")
+
 if __name__ == "__main__":
     BASE_DIR = Path(__file__).resolve().parent
-    parser = argparse.ArgumentParser(description="Run SAM & Export Polygon Points to Excel / CSV")
-    parser.add_argument("--image", default=str(BASE_DIR / "dataset_split" / "train" / "images" / "VID20210601143927-96_jpg.rf.36de73b8200ee94d0bd4679407c9cd40.jpg"))
-    parser.add_argument("--labels", default=str(BASE_DIR / "dataset_split" / "train" / "labels" / "VID20210601143927-96_jpg.rf.36de73b8200ee94d0bd4679407c9cd40.txt"))
-    parser.add_argument("--output", default=str(BASE_DIR / "sam_points_output"))
-    parser.add_argument("--sam", default=str(BASE_DIR / "sam_vit_b.pth"))
+    parser = argparse.ArgumentParser(description="Run SAM on PCB Dataset or Single Image")
+    parser.add_argument("--image", default=None, help="Path to single image file")
+    parser.add_argument("--images", default=str(BASE_DIR / "dataset_split" / "test" / "images"), help="Path to folder of images")
+    parser.add_argument("--labels", default=str(BASE_DIR / "dataset_split" / "test" / "labels"), help="Path to labels file or directory")
+    parser.add_argument("--output", default=str(BASE_DIR / "sam_points_output"), help="Output directory")
+    parser.add_argument("--sam", default=str(BASE_DIR / "sam_vit_b.pth"), help="SAM ViT-B checkpoint path")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of images to process")
     parser.add_argument("--no-labelme", action="store_true", help="Do not launch LabelMe GUI")
     args = parser.parse_args()
 
-    run_sam(
-        image_path=Path(args.image),
-        labels_path=Path(args.labels),
-        sam_checkpoint=Path(args.sam),
-        output_dir=Path(args.output),
-        open_labelme=not args.no_labelme
-    )
+    sam_ckpt = Path(args.sam)
+    if not sam_ckpt.exists() and Path("c:/Userdata/antiiii/sam_vit_b.pth").exists():
+        sam_ckpt = Path("c:/Userdata/antiiii/sam_vit_b.pth")
+
+    if args.image:
+        run_sam(
+            image_path=Path(args.image),
+            labels_path=Path(args.labels),
+            sam_checkpoint=sam_ckpt,
+            output_dir=Path(args.output),
+            open_labelme=not args.no_labelme
+        )
+    else:
+        run_batch_sam(
+            source_dir=Path(args.images),
+            labels_dir=Path(args.labels),
+            sam_checkpoint=sam_ckpt,
+            output_dir=Path(args.output),
+            limit=args.limit
+        )
