@@ -2,14 +2,13 @@
 """
 clean_wacv.py
 
-Pipeline: WACV 2019 PCB Dataset Data Cleaning & SAM Polygon Point Extraction.
-- Ingests WACV XML annotations (Pascal VOC format) and board images.
+Pipeline for WACV 2019 PCB Dataset:
+- Ingests Pascal VOC XML annotations and board images.
 - Filters out non-components ('text', 'pads').
-- Validates and sanitizes component bounding boxes.
-- Prompts Meta's SAM (Segment Anything Model) to extract component segmentation masks.
-- Extracts polygon boundary points [(x, y), ...] via OpenCV contours.
+- Cleans and clamps component bounding boxes.
+- Prompts Meta's SAM (Segment Anything Model) to extract polygon points [(x, y), ...].
 - Maps classes to KiCad Library Convention (KLC) footprints and Reference Designators.
-- Exports results to Excel (.xlsx), CSV (.csv), and LabelMe JSON (.json).
+- Progressively exports results to Excel (.xlsx), CSV (.csv), and LabelMe JSON (.json).
 """
 
 import os
@@ -17,7 +16,6 @@ import sys
 import json
 import shutil
 import argparse
-import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Tuple, Any
@@ -80,55 +78,40 @@ def resolve_label(raw_name: str) -> Tuple[str, Dict[str, str]]:
             return key, info
     return 'component', WACV_CLASSES['component']
 
-def process_wacv_board(
+def process_single_board(
     board_dir: Path,
-    sam_checkpoint: Path,
+    predictor: SamPredictor,
     output_dir: Path,
-    open_labelme: bool = True,
     max_components: int = None
-):
-    output_dir.mkdir(parents=True, exist_ok=True)
+) -> List[Dict[str, Any]]:
     board_name = board_dir.name
 
-    # Find image and xml
     xml_files = list(board_dir.glob("*.xml"))
     if not xml_files:
-        raise FileNotFoundError(f"No XML annotation found in {board_dir}")
+        return []
     xml_path = xml_files[0]
 
     img_files = list(board_dir.glob("*.jpg")) + list(board_dir.glob("*.png"))
     if not img_files:
-        raise FileNotFoundError(f"No image found in {board_dir}")
-    # Prefer jpg, fallback png
-    img_path = [p for p in img_files if p.suffix.lower() == '.jpg']
-    img_path = img_path[0] if img_path else img_files[0]
-
-    print("=" * 75)
-    print(f"WACV SAM POINT EXTRACTOR: Board '{board_name}'")
-    print("=" * 75)
-    print(f"Image:  {img_path}")
-    print(f"XML:    {xml_path}")
-    print(f"Output: {output_dir}")
+        return []
+    jpg_matches = [p for p in img_files if p.suffix.lower() == '.jpg']
+    img_path = jpg_matches[0] if jpg_matches else img_files[0]
 
     img = cv2.imread(str(img_path))
     if img is None:
-        raise ValueError(f"Could not load image: {img_path}")
+        return []
     h, w = img.shape[:2]
 
-    # Parse XML annotations
     tree = ET.parse(xml_path)
     root = tree.getroot()
 
     parsed_boxes = []
-    skipped_text = 0
-
     for obj in root.findall('object'):
         name_tag = obj.find('name')
         raw_name = name_tag.text if name_tag is not None else ""
         first_word = raw_name.strip().strip('"').lower().split()[0] if raw_name else ""
 
         if first_word in IGNORED_LABELS:
-            skipped_text += 1
             continue
 
         bnd = obj.find('bndbox')
@@ -145,37 +128,23 @@ def process_wacv_board(
             norm_type, info = resolve_label(raw_name)
             parsed_boxes.append((box, norm_type, info, raw_name))
 
-    print(f"\nFound {len(parsed_boxes)} component bounding boxes (skipped {skipped_text} text/pads markings).")
+    if not parsed_boxes:
+        return []
+
     if max_components:
         parsed_boxes = parsed_boxes[:max_components]
-        print(f"Limiting to first {max_components} components for faster execution.")
 
-    # Initialize SAM
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\nLoading SAM ({sam_checkpoint}) on {device}...")
-    sam = sam_model_registry["vit_b"](checkpoint=str(sam_checkpoint))
-    sam.to(device=device)
-    sam.eval()
-    predictor = SamPredictor(sam)
-
-    print("Encoding PCB image with Vision Transformer...")
+    print(f"Board '{board_name}': segmenting {len(parsed_boxes)} components...")
     predictor.set_image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    print("SAM image embedding ready!\n")
 
     records = []
     shapes = []
     ref_counts = {}
 
-    print("Extracting SAM Polygon Points:")
-    print("-" * 75)
-
     for idx, (box, norm_type, info, raw_name) in enumerate(parsed_boxes, 1):
-        input_box = np.array(box)
-        masks, scores, _ = predictor.predict(box=input_box[None, :], multimask_output=False)
-        mask = masks[0]
+        masks, scores, _ = predictor.predict(box=np.array(box)[None, :], multimask_output=False)
         conf = float(scores[0])
-
-        pts = extract_polygon(mask)
+        pts = extract_polygon(masks[0])
         if not pts:
             pts = [[float(box[0]), float(box[1])], [float(box[2]), float(box[1])],
                    [float(box[2]), float(box[3])], [float(box[0]), float(box[3])]]
@@ -183,8 +152,6 @@ def process_wacv_board(
         pfx = info['ref_prefix']
         ref_counts[pfx] = ref_counts.get(pfx, 0) + 1
         ref_des = f"{pfx}{ref_counts[pfx]}"
-
-        print(f"[{idx:02d}] {ref_des:4s} ({norm_type}): {len(pts)} polygon points | Conf: {conf:.3f}")
 
         records.append({
             "board_name": board_name,
@@ -205,26 +172,10 @@ def process_wacv_board(
         shapes.append({
             "label": f"{ref_des}: {norm_type.upper()}",
             "points": pts,
-            "group_id": None,
-            "description": f"SAM mask ({info['kicad']}, conf: {conf:.2f})",
-            "shape_type": "polygon",
-            "flags": {},
-            "mask": None
+            "shape_type": "polygon"
         })
 
-    # Save Excel and CSV
-    df = pd.DataFrame(records)
-    xlsx_path = output_dir / f"{board_name}_sam_points.xlsx"
-    csv_path = output_dir / f"{board_name}_sam_points.csv"
-    df.to_excel(xlsx_path, index=False)
-    df.to_csv(csv_path, index=False)
-
-    print("\n" + "=" * 75)
-    print("OUTPUT SAVED:")
-    print(f"  -> Excel Spreadsheet (.xlsx): {xlsx_path.resolve()}")
-    print(f"  -> CSV File (.csv):           {csv_path.resolve()}")
-
-    # Save LabelMe JSON & copy image
+    # Save copy of image and LabelMe JSON
     dest_img = output_dir / img_path.name
     if not dest_img.exists():
         shutil.copy2(img_path, dest_img)
@@ -242,38 +193,71 @@ def process_wacv_board(
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(labelme_payload, f, indent=2)
 
-    print(f"  -> LabelMe Annotation (.json):{json_path.resolve()}")
+    return records
 
-    # Auto-launch LabelMe GUI
-    if open_labelme:
-        print("\nOpening in LabelMe...")
-        try:
-            subprocess.Popen([sys.executable, "-m", "labelme", str(json_path)])
-            print("LabelMe launched successfully!")
-        except Exception as e:
-            print(f"Note on opening LabelMe: {e}")
+def run_wacv_pipeline(
+    source_dir: Path,
+    sam_checkpoint: Path,
+    output_dir: Path,
+    limit_boards: int = None,
+    limit_components: int = None
+):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = output_dir / "wacv_all_boards_sam_points.csv"
+    xlsx_path = output_dir / "wacv_all_boards_sam_points.xlsx"
 
-    print("=" * 75)
-    return xlsx_path, csv_path, json_path
+    # Identify if source is single board or parent folder containing multiple boards
+    if (source_dir / "ArduinoMega_Top").exists() or len(list(source_dir.glob("*.xml"))) == 0:
+        board_dirs = sorted([d for d in source_dir.iterdir() if d.is_dir() and list(d.glob("*.xml"))])
+    else:
+        board_dirs = [source_dir]
+
+    if limit_boards:
+        board_dirs = board_dirs[:limit_boards]
+
+    print(f"Processing {len(board_dirs)} WACV boards...")
+
+    # Load SAM once
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading SAM ({sam_checkpoint}) on {device}...")
+    sam = sam_model_registry["vit_b"](checkpoint=str(sam_checkpoint))
+    sam.to(device=device)
+    sam.eval()
+    predictor = SamPredictor(sam)
+
+    all_records = []
+    for idx, b_dir in enumerate(board_dirs, 1):
+        print(f"[{idx}/{len(board_dirs)}] Processing board: {b_dir.name}")
+        records = process_single_board(b_dir, predictor, output_dir, max_components=limit_components)
+        all_records.extend(records)
+
+        # Progressively save spreadsheets
+        if all_records:
+            df = pd.DataFrame(all_records)
+            df.to_csv(csv_path, index=False)
+            df.to_excel(xlsx_path, index=False)
+
+    print(f"Completed WACV extraction: {len(all_records)} total components across {len(board_dirs)} boards.")
+    print(f"Saved: {csv_path}")
 
 if __name__ == "__main__":
     BASE_DIR = Path(__file__).resolve().parent
-    DEFAULT_WACV_DIR = BASE_DIR / "wacv_data" / "pcb_wacv_2019" / "ArduinoMega_Top"
+    DEFAULT_WACV_DIR = BASE_DIR / "wacv_data" / "pcb_wacv_2019"
     DEFAULT_SAM = BASE_DIR / "sam_vit_b.pth"
     DEFAULT_OUT = BASE_DIR / "wacv_sam_output"
 
     parser = argparse.ArgumentParser(description="Clean WACV PCB & Extract SAM Polygon Points")
-    parser.add_argument("--board-dir", default=str(DEFAULT_WACV_DIR), help="Path to board folder containing XML and image")
+    parser.add_argument("--source", default=str(DEFAULT_WACV_DIR), help="Path to board folder or pcb_wacv_2019 directory")
     parser.add_argument("--sam", default=str(DEFAULT_SAM), help="Path to SAM ViT-B checkpoint")
     parser.add_argument("--output", default=str(DEFAULT_OUT), help="Output directory")
-    parser.add_argument("--limit-components", type=int, default=None, help="Limit number of components to segment")
-    parser.add_argument("--no-labelme", action="store_true", help="Do not launch LabelMe GUI")
+    parser.add_argument("--limit-boards", type=int, default=None, help="Limit number of boards to process")
+    parser.add_argument("--limit-components", type=int, default=None, help="Limit components per board")
     args = parser.parse_args()
 
-    process_wacv_board(
-        board_dir=Path(args.board_dir),
+    run_wacv_pipeline(
+        source_dir=Path(args.source),
         sam_checkpoint=Path(args.sam),
         output_dir=Path(args.output),
-        open_labelme=not args.no_labelme,
-        max_components=args.limit_components
+        limit_boards=args.limit_boards,
+        limit_components=args.limit_components
     )
