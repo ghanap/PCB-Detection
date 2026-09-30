@@ -62,3 +62,13 @@ Output CSV and Excel spreadsheets contain:
 * `num_polygon_points`: Number of vertices
 * `polygon_points_compact`: String format `(x1,y1); (x2,y2); ...`
 * `polygon_points_json`: JSON coordinate array `[[x1, y1], [x2, y2], ...]`
+
+## Reproducibility & Benchmark Training
+
+The full multi-model benchmark (YOLO bounding boxes vs SAM pseudo-labels) was trained and evaluated on Kaggle GPUs. 
+
+To completely recreate the 10-hour training run and evaluation metrics side-by-side, you can run this Kaggle notebook with a single click:
+* **Kaggle Notebook:** [PCB YOLO & SAM Multi-Model Training](https://www.kaggle.com/code/dragonfliez/pcb-yolo-sam-multi-model-training)
+* **Dataset Used:** [FICS PCB YOLO Cleaned](https://www.kaggle.com/datasets/dragonfliez/fics-pcb-yolo-cleaned)
+
+*(Note: If the links return a 404 error, the author needs to toggle their Kaggle privacy settings to 'Public'.)*
