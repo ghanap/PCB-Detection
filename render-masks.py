@@ -150,12 +150,12 @@ def process_directory(input_dir: Path, output_dir: Path, alpha: float = 0.45):
         with open(jf, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        shapes = data.get("shapes", [])
+        shapes = data.get("shapes", []) if isinstance(data, dict) else data
         if not shapes:
             continue
 
         # find the matching image
-        img_name = data.get("imagePath", "")
+        img_name = data.get("imagePath", "") if isinstance(data, dict) else ""
         img_path = input_dir / img_name
         if not img_path.exists():
             # try same stem with common extensions
@@ -198,3 +198,5 @@ if __name__ == "__main__":
     output_dir = Path(args.output) if args.output else input_dir / "masked"
 
     process_directory(input_dir, output_dir, alpha=args.alpha)
+
+
