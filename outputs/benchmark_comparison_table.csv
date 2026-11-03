@@ -1,0 +1,4 @@
+Split,SAM - w/ OBB (mAP),SAM - w/ BB (mAP),YOLO - BB (mAP),Test Set IoU
+Test Set,0.932,0.884,0.841,0.918
+Validation Set,0.941,0.895,0.856,
+Train Set,0.958,0.912,0.879,
